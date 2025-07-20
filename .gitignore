@@ -1,2 +1,4 @@
 /.vscode
 .code-workspace
+bin/kv.code-workspace
+src/kv.code-workspace
