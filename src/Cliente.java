@@ -41,7 +41,6 @@ class Cliente {
             }
         }
 
-        scanner.close();
         System.out.println("Cliente inicializado com sucesso!");
     }
 
@@ -73,7 +72,6 @@ class Cliente {
                         " timestamp " + resposta.getTimestamp() +
                         " realizada no servidor " + ip + ":" + porta);
             }
-            scanner.close();
 
         } catch (Exception e) {
             System.err.println("Erro ao executar PUT: " + e.getMessage());
@@ -125,7 +123,6 @@ class Cliente {
 
                 callbackSocket.close();
                 serverSocket.close();
-                scanner.close();
             } else {
                 timestamps.put(key, resposta.getTimestamp());
                 System.out.println("GET key: " + key + " value: " + resposta.getValue() +
@@ -164,13 +161,11 @@ class Cliente {
                     break;
                 case "4":
                     System.out.println("Saindo...");
-                    scanner.close();
                     return;
                 default:
                     System.out.println("Opção inválida!");
             }
         }
-        
     }
 
     public static void main(String[] args) {
