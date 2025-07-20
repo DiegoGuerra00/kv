@@ -6,18 +6,24 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
 import java.util.Scanner;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 class Cliente {
     private String[] servidorIPs;
     private int[] servidorPortas;
     private Map<String, Long> timestamps;
     private Random random;
+    private ExecutorService threadPool;
+    private ServerSocket callbackServer;
+    private int callbackPorta;
 
     public Cliente() {
         this.servidorIPs = new String[3];
         this.servidorPortas = new int[3];
         this.timestamps = new HashMap<>();
         this.random = new Random();
+        this.threadPool = Executors.newCachedThreadPool();
     }
 
     public void inicializar() {
@@ -41,7 +47,74 @@ class Cliente {
             }
         }
 
+        // Inicializar servidor de callback para respostas assíncronas
+        try {
+            callbackServer = new ServerSocket(0); // Porta automática
+            callbackPorta = callbackServer.getLocalPort();
+            System.out.println("Servidor de callback iniciado na porta: " + callbackPorta);
+            
+            // Iniciar thread para aceitar callbacks assíncronos
+            threadPool.submit(new CallbackListener());
+            
+        } catch (Exception e) {
+            System.err.println("Erro ao inicializar servidor de callback: " + e.getMessage());
+        }
+
         System.out.println("Cliente inicializado com sucesso!");
+    }
+
+    private class CallbackListener implements Runnable {
+        @Override
+        public void run() {
+            while (!callbackServer.isClosed()) {
+                try {
+                    Socket clientSocket = callbackServer.accept();
+                    threadPool.submit(new CallbackHandler(clientSocket));
+                } catch (Exception e) {
+                    if (!callbackServer.isClosed()) {
+                        System.err.println("Erro ao aceitar callback: " + e.getMessage());
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    private class CallbackHandler implements Runnable {
+        private Socket socket;
+
+        public CallbackHandler(Socket socket) {
+            this.socket = socket;
+        }
+
+        @Override
+        public void run() {
+            try (ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
+                Mensagem resposta = (Mensagem) in.readObject();
+                
+                if (resposta.getTipo() == Mensagem.TipoMensagem.GET_RESPONSE) {
+                    // Atualizar timestamp local
+                    timestamps.put(resposta.getKey(), resposta.getTimestamp());
+                    
+                    // Imprimir resposta assíncrona
+                    System.out.println("\n[RESPOSTA ASSÍNCRONA] GET key: " + resposta.getKey() + 
+                                     " value: " + resposta.getValue() +
+                                     " obtido do servidor de forma assíncrona" +
+                                     ", meu timestamp anterior era menor" +
+                                     " e do servidor " + resposta.getTimestamp());
+                    System.out.print("Digite uma opção: "); // Reexibir prompt
+                }
+                
+            } catch (Exception e) {
+                System.err.println("Erro ao processar callback: " + e.getMessage());
+            } finally {
+                try {
+                    socket.close();
+                } catch (Exception e) {
+                    // Ignorar erro de fechamento
+                }
+            }
+        }
     }
 
     public void executarPUT() {
@@ -94,36 +167,22 @@ class Cliente {
                 ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
                 ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
 
+            // CORREÇÃO: Incluir informações de callback na mensagem GET
             Mensagem getMsg = new Mensagem(Mensagem.TipoMensagem.GET, key, timestampCliente);
+            getMsg.setClienteIP("127.0.0.1"); // IP do cliente para callback
+            getMsg.setClientePorta(callbackPorta); // Porta do servidor de callback do cliente
             out.writeObject(getMsg);
 
             Mensagem resposta = (Mensagem) in.readObject();
 
             if (resposta.getTipo() == Mensagem.TipoMensagem.WAIT_FOR_RESPONSE) {
+                System.out.println("GET key: " + key + 
+                                 " obtido do servidor " + ip + ":" + porta +
+                                 ", meu timestamp " + timestampCliente +
+                                 " e do servidor é menor, portanto devolvendo WAIT_FOR_RESPONSE");
                 System.out.println("Aguardando resposta assíncrona...");
-
-                // Aguardar resposta assíncrona
-                ServerSocket serverSocket = new ServerSocket(0);
-                int portaLocal = serverSocket.getLocalPort();
-
-                // Informar ao servidor nossa porta para callback
-                Mensagem callbackInfo = new Mensagem(Mensagem.TipoMensagem.GET, key, timestampCliente);
-                callbackInfo.setClientePorta(portaLocal);
-                out.writeObject(callbackInfo);
-
-                Socket callbackSocket = serverSocket.accept();
-                ObjectInputStream callbackIn = new ObjectInputStream(callbackSocket.getInputStream());
-                Mensagem respostaAssincrona = (Mensagem) callbackIn.readObject();
-
-                timestamps.put(key, respostaAssincrona.getTimestamp());
-                System.out.println("GET key: " + key + " value: " + respostaAssincrona.getValue() +
-                        " obtido do servidor " + ip + ":" + porta +
-                        ", meu timestamp " + timestampCliente +
-                        " e do servidor " + respostaAssincrona.getTimestamp());
-
-                callbackSocket.close();
-                serverSocket.close();
-            } else {
+                
+            } else if (resposta.getTipo() == Mensagem.TipoMensagem.GET_RESPONSE) {
                 timestamps.put(key, resposta.getTimestamp());
                 System.out.println("GET key: " + key + " value: " + resposta.getValue() +
                         " obtido do servidor " + ip + ":" + porta +
@@ -154,13 +213,33 @@ class Cliente {
                     inicializar();
                     break;
                 case "2":
+                    if (servidorIPs[0] == null) {
+                        System.out.println("Execute INIT primeiro!");
+                        break;
+                    }
                     executarPUT();
                     break;
                 case "3":
+                    if (servidorIPs[0] == null) {
+                        System.out.println("Execute INIT primeiro!");
+                        break;
+                    }
+                    if (callbackServer == null) {
+                        System.out.println("Execute INIT primeiro para configurar callback!");
+                        break;
+                    }
                     executarGET();
                     break;
                 case "4":
                     System.out.println("Saindo...");
+                    try {
+                        if (callbackServer != null && !callbackServer.isClosed()) {
+                            callbackServer.close();
+                        }
+                        threadPool.shutdown();
+                    } catch (Exception e) {
+                        // Ignorar erro de fechamento
+                    }
                     return;
                 default:
                     System.out.println("Opção inválida!");

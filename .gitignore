@@ -1,3 +1,25 @@
+# Java build and IDE files
+*.class
+*.jar
+*.war
+*.ear
+
+# Maven/Gradle directories
+target/
+build/
+
+# IDE settings
+/.idea/
+*.iml
+*.ipr
+*.iws
+/.vscode/
+*.code-workspace
+
+# Logs and temp files
+*.log
+*.tmp
+
 /.vscode
 .code-workspace
 bin/kv.code-workspace

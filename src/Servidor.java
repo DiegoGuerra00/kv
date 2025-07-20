@@ -3,9 +3,12 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Scanner;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -25,8 +28,11 @@ class Servidor {
     private Map<String, Integer> replicationConfirmations;
     private Map<String, Mensagem> pendingPutResponses;
     private Map<String, ClientConnection> pendingClientConnections;
+    
+    // Para gerenciar clientes aguardando respostas assíncronas
+    private Map<String, List<WaitingClient>> waitingClients;
 
-    // Classe para manter conexões de cliente abertas
+    // Classe para manter conexões de cliente abertas para PUT
     private static class ClientConnection {
         Socket socket;
         ObjectOutputStream out;
@@ -42,6 +48,19 @@ class Servidor {
             this.clientePorta = clientePorta;
         }
     }
+    
+    // Classe para manter informações de clientes aguardando GET assíncrono
+    private static class WaitingClient {
+        String clienteIP;
+        int clientePorta;
+        long timestampRequerido;
+        
+        WaitingClient(String clienteIP, int clientePorta, long timestampRequerido) {
+            this.clienteIP = clienteIP;
+            this.clientePorta = clientePorta;
+            this.timestampRequerido = timestampRequerido;
+        }
+    }
 
     public Servidor() {
         this.tabelaHash = new HashMap<>();
@@ -51,6 +70,7 @@ class Servidor {
         this.replicationConfirmations = new HashMap<>();
         this.pendingPutResponses = new HashMap<>();
         this.pendingClientConnections = new HashMap<>();
+        this.waitingClients = new ConcurrentHashMap<>();
     }
 
     public void inicializar() {
@@ -188,6 +208,10 @@ class Servidor {
                     out.writeObject(putOk);
                     System.out.println("Enviando PUT_OK ao Cliente " + clienteIP + ":" + clientePorta + " da key:"
                             + mensagem.getKey() + " ts:" + contadorTimestamp);
+                    
+                    // Notificar clientes aguardando esta key
+                    notificarClientesAguardando(mensagem.getKey());
+                    
                     return false; // Não manter conexão aberta
                 } else {
                     // Criar chave única para este PUT
@@ -220,6 +244,16 @@ class Servidor {
         String clienteIP = socket.getInetAddress().getHostAddress();
         int clientePorta = socket.getPort();
 
+        // CORREÇÃO: Usar informações de callback do cliente se fornecidas
+        String callbackIP = mensagem.getClienteIP();
+        int callbackPorta = mensagem.getClientePorta();
+        
+        // Se não foram fornecidas, usar informações da conexão atual
+        if (callbackIP == null || callbackPorta == 0) {
+            callbackIP = clienteIP;
+            callbackPorta = clientePorta;
+        }
+
         synchronized (lock) {
             String key = mensagem.getKey();
             long timestampCliente = mensagem.getTimestamp();
@@ -236,30 +270,13 @@ class Servidor {
                 Mensagem resposta = new Mensagem(Mensagem.TipoMensagem.GET_RESPONSE, key, value, timestampServidor);
                 out.writeObject(resposta);
             } else {
+                // Enviar WAIT_FOR_RESPONSE e fechar conexão
                 Mensagem waitMsg = new Mensagem(Mensagem.TipoMensagem.WAIT_FOR_RESPONSE);
                 out.writeObject(waitMsg);
 
-                // Implementar lógica de espera assíncrona para atualização
-                // Aguardar atualização assíncrona
-                threadPool.submit(() -> {
-                    try {
-                        while (true) {
-                            Thread.sleep(100);
-                            synchronized (lock) {
-                                long novoTimestamp = timestamps.getOrDefault(key, 0L);
-                                if (novoTimestamp >= timestampCliente) {
-                                    String value = tabelaHash.getOrDefault(key, "NULL");
-
-                                    // Para implementação correta, seria necessário implementar callback assíncrono
-                                    // Por enquanto, retornando resposta direta
-                                    break;
-                                }
-                            }
-                        }
-                    } catch (Exception e) {
-                        System.err.println("Erro na resposta assíncrona: " + e.getMessage());
-                    }
-                });
+                // CORREÇÃO: Adicionar cliente à lista de espera usando informações de callback
+                List<WaitingClient> clientesEsperando = waitingClients.computeIfAbsent(key, k -> new ArrayList<>());
+                clientesEsperando.add(new WaitingClient(callbackIP, callbackPorta, timestampCliente));
             }
         }
     }
@@ -272,6 +289,9 @@ class Servidor {
             tabelaHash.put(mensagem.getKey(), mensagem.getValue());
             timestamps.put(mensagem.getKey(), mensagem.getTimestamp());
         }
+
+        // Notificar clientes aguardando esta key
+        notificarClientesAguardando(mensagem.getKey());
 
         Mensagem replicationOk = new Mensagem(Mensagem.TipoMensagem.REPLICATION_OK);
         replicationOk.setKey(mensagem.getKey());
@@ -326,12 +346,56 @@ class Servidor {
                             }
                         }
 
+                        // Notificar clientes aguardando esta key
+                        notificarClientesAguardando(mensagem.getKey());
+
                         // Limpar estruturas pendentes
                         replicationConfirmations.remove(putKey);
                         replicationConfirmations.remove(putKey + "_total");
                         pendingPutResponses.remove(putKey);
                         pendingClientConnections.remove(putKey);
                     }
+                }
+            }
+        }
+    }
+
+    private void notificarClientesAguardando(String key) {
+        List<WaitingClient> clientes = waitingClients.get(key);
+        if (clientes != null && !clientes.isEmpty()) {
+            synchronized (lock) {
+                long timestampAtual = timestamps.getOrDefault(key, 0L);
+                String value = tabelaHash.getOrDefault(key, "NULL");
+                
+                // Lista para remover clientes que foram notificados
+                List<WaitingClient> clientesParaRemover = new ArrayList<>();
+                
+                for (WaitingClient cliente : clientes) {
+                    if (timestampAtual >= cliente.timestampRequerido) {
+                        // Enviar resposta assíncrona para o cliente
+                        threadPool.submit(() -> {
+                            try (Socket clientSocket = new Socket(cliente.clienteIP, cliente.clientePorta);
+                                 ObjectOutputStream clientOut = new ObjectOutputStream(clientSocket.getOutputStream())) {
+                                
+                                Mensagem resposta = new Mensagem(Mensagem.TipoMensagem.GET_RESPONSE, key, value, timestampAtual);
+                                clientOut.writeObject(resposta);
+                                
+                            } catch (Exception e) {
+                                System.err.println("Erro ao enviar resposta assíncrona para cliente " + 
+                                                 cliente.clienteIP + ":" + cliente.clientePorta + " - " + e.getMessage());
+                            }
+                        });
+                        
+                        clientesParaRemover.add(cliente);
+                    }
+                }
+                
+                // Remover clientes que foram notificados
+                clientes.removeAll(clientesParaRemover);
+                
+                // Se não há mais clientes aguardando, remover a entrada
+                if (clientes.isEmpty()) {
+                    waitingClients.remove(key);
                 }
             }
         }
