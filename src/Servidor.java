@@ -23,6 +23,10 @@ class Servidor {
     private final Object lock = new Object();
     private ExecutorService threadPool;
 
+    // Para armazenar informações de todos os servidores do sistema
+    private String[] servidorIPs;
+    private int[] servidorPortas;
+
     // Para controlar confirmações de replicação
     private Map<String, Integer> replicationConfirmations;
     private Map<String, Mensagem> pendingPutResponses;
@@ -72,6 +76,9 @@ class Servidor {
         this.pendingClientConnections = new HashMap<>();
         // CHANGED: Using HashMap instead of ConcurrentHashMap
         this.waitingClients = new HashMap<>();
+        // Inicializar arrays para armazenar informações dos servidores
+        this.servidorIPs = new String[3];
+        this.servidorPortas = new int[3];
     }
 
     public void inicializar() {
@@ -93,9 +100,27 @@ class Servidor {
 
         this.souLider = (this.meuIP.equals(this.liderIP) && this.minhaPorta == this.liderPorta);
 
+        // Coletar informações de todos os 3 servidores do sistema
+        System.out.println("\n=== CONFIGURAÇÃO DOS SERVIDORES DO SISTEMA ===");
+        for (int i = 0; i < 2; i++) {
+            System.out.print("Digite o IP do servidor " + (i + 1) + " (padrão: 127.0.0.1): ");
+            String serverIP = scanner.nextLine().trim();
+            if (serverIP.isEmpty()) {
+                serverIP = "127.0.0.1";
+            }
+            servidorIPs[i] = serverIP;
+
+            System.out.print("Digite a porta do servidor " + (i + 1) + ": ");
+            servidorPortas[i] = Integer.parseInt(scanner.nextLine());
+        }
+
         System.out.println("Servidor iniciado em " + meuIP + ":" + minhaPorta);
         System.out.println("Líder: " + liderIP + ":" + liderPorta);
         System.out.println("Sou líder: " + souLider);
+        System.out.println("Servidores do sistema configurados:");
+        for (int i = 0; i < 2; i++) {
+            System.out.println("  Servidor " + (i + 1) + ": " + servidorIPs[i] + ":" + servidorPortas[i]);
+        }
     }
 
     public void iniciarServidor() {
@@ -194,10 +219,9 @@ class Servidor {
                 timestamps.put(mensagem.getKey(), contadorTimestamp);
 
                 // Contar quantos servidores não-líderes existem
-                int[] portas = { 10097, 10098, 10099 };
                 int numServidoresNaoLider = 0;
-                for (int porta : portas) {
-                    if (porta != minhaPorta) {
+                for (int i = 0; i < 2; i++) {
+                    if (!(servidorIPs[i].equals(meuIP) && servidorPortas[i] == minhaPorta)) {
                         numServidoresNaoLider++;
                     }
                 }
@@ -410,13 +434,15 @@ class Servidor {
 
     private void replicarParaOutrosServidores(String key, String value, long timestamp, String putKey,
             int numServidoresEsperados) {
-        // Portas padrão dos servidores
-        int[] portas = { 10097, 10098, 10099 };
-
-        for (int porta : portas) {
-            if (porta != minhaPorta) {
+        // Replicar para todos os outros servidores do sistema
+        for (int i = 0; i < 2; i++) {
+            String serverIP = servidorIPs[i];
+            int serverPorta = servidorPortas[i];
+            
+            // Não replicar para si mesmo
+            if (!(serverIP.equals(meuIP) && serverPorta == minhaPorta)) {
                 threadPool.submit(() -> {
-                    try (Socket socket = new Socket("127.0.0.1", porta);
+                    try (Socket socket = new Socket(serverIP, serverPorta);
                             ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
                             ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
 
@@ -433,7 +459,7 @@ class Servidor {
                         }
 
                     } catch (Exception e) {
-                        System.err.println("Erro ao replicar para servidor na porta " + porta + ": " + e.getMessage());
+                        System.err.println("Erro ao replicar para servidor " + serverIP + ":" + serverPorta + ": " + e.getMessage());
 
                         // Em caso de erro, ainda processar como se fosse uma confirmação
                         // para evitar que o cliente fique esperando indefinidamente
